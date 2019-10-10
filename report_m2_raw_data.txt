@@ -1,0 +1,17 @@
+✱ Running python m2.1.py
+Loading fashion-mnist data... done
+Loading model... done
+New Inference
+Op Time: 11.848820
+Op Time: 78.762176
+Correctness: 0.7653 Model: ece408
+
+
+✱ Running /usr/bin/time python m2.1.py
+Loading fashion-mnist data... done
+Loading model... done
+New Inference
+Op Time: 11.857139
+Op Time: 76.192041
+Correctness: 0.7653 Model: ece408
+101.02user 8.16system 1:31.65elapsed 119%CPU

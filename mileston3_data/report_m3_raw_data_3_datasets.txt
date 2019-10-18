@@ -1,0 +1,21 @@
+✱ Running python m3.1.py
+Loading fashion-mnist data... done
+Loading model... done
+New Inference
+Op Time: 0.024381
+Op Time: 0.088384
+Correctness: 0.7653 Model: ece408
+✱ Running python m3.1.py 1000
+Loading fashion-mnist data... done
+Loading model... done
+New Inference
+Op Time: 0.002463
+Op Time: 0.008877
+Correctness: 0.767 Model: ece408
+✱ Running python m3.1.py 100
+Loading fashion-mnist data... done
+Loading model... done
+New Inference
+Op Time: 0.000278
+Op Time: 0.000929
+Correctness: 0.76 Model: ece408

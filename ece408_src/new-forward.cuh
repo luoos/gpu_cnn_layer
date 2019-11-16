@@ -26,9 +26,13 @@ __global__ void forward_kernel( float *y, const float *x, const float *k,
 
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
+    int X_tile_width = TILE_WIDTH + K - 1;
     // (void)H_out; // silence declared but never referenced warning. remove this line when you start working
     // (void)W_out; // silence declared but never referenced warning. remove this line when you start working
 
+    extern __shared__ float shmem[];
+    float* X_shared = &shmem[0];
+    float* W_shared = &shmem[X_tile_width * X_tile_width];
 // An example use of these macros:
 // float a = y4d(0,0,0,0)
 // y4d(0,0,0,0) = a
@@ -39,17 +43,42 @@ __global__ void forward_kernel( float *y, const float *x, const float *k,
     int b = blockIdx.z; int m = blockIdx.y;
     int tile_h = blockIdx.x/TILE_W;
     int tile_w = blockIdx.x%TILE_W;
-    int h = tile_h*TILE_WIDTH + threadIdx.y;
-    int w = tile_w*TILE_WIDTH + threadIdx.x;
+    int h_base = tile_h*TILE_WIDTH;
+    int w_base = tile_w*TILE_WIDTH;
+    int h0 = threadIdx.y;
+    int w0 = threadIdx.x;
+    int h = h_base + h0;
+    int w = w_base + w0;
     float acc = 0;
-    if (h < H_out && w < W_out) {
-        for (int c = 0; c < C; c++) {
-            for (int p = 0; p < K; p++) {
-                for (int q = 0; q < K; q++) {
-                    acc += x4d(b, c, h + p, w + q) * k4d(m, c, p, q);
+
+    for (int c = 0; c < C; c++) {
+        // loads K into shared memory
+        if ((h0 < K) && (w0 < K)) {
+            W_shared[h0 * K + w0] = k4d(m, c, h0, w0);
+        }
+        __syncthreads();
+
+        for (int i = h; i < h_base + X_tile_width; i += TILE_WIDTH) {
+            for (int j = w; j < w_base + X_tile_width; j += TILE_WIDTH) {
+                if ((i < H) && (j < W)) {
+                    X_shared[(i - h_base)*X_tile_width + j - w_base] = x4d(b, c, i, j);
+                } else {
+                    X_shared[(i - h_base)*X_tile_width + j - w_base] = 0.0;
                 }
             }
         }
+        __syncthreads();
+
+        if (h < H_out && w < W_out) {
+            for (int p = 0; p < K; p++) {
+                for (int q = 0; q < K; q++) {
+                    acc += X_shared[(h0 + p)*X_tile_width + w0 + q] * W_shared[p * K + q];
+                }
+            }
+        }
+        __syncthreads();
+    }
+    if (h < H_out && w < W_out) {
         y4d(b, m, h, w) = acc;
     }
 
@@ -58,7 +87,7 @@ __global__ void forward_kernel( float *y, const float *x, const float *k,
 #undef k4d
 }
 
-/* 
+/*
    This function is called by new-inl.h
    Any code you write should be executed by this function.
    For ECE408, we only expect the float version of the operator to be called, so here we specialize with only floats.
@@ -88,14 +117,15 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     dim3 blockDim(TILE_WIDTH, TILE_WIDTH, 1);
 
     // Call the kernel
-    forward_kernel<<<gridDim, blockDim>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K,TILE_CNT_H,TILE_CNT_W);
+    size_t shmem_size = sizeof(float) * ((TILE_WIDTH + K - 1)*(TILE_WIDTH + K - 1) + K*K);
+    forward_kernel<<<gridDim, blockDim, shmem_size>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K,TILE_CNT_H,TILE_CNT_W);
 
     // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.
     MSHADOW_CUDA_CALL(cudaDeviceSynchronize());
 
 }
 
-/* 
+/*
     This tells mxnet how to do an op when it's not a float.
     This is not used in the ECE408 project
 */

@@ -11,6 +11,8 @@ namespace mxnet
 namespace op
 {
 
+__constant__ float const_k[12000];
+
 __global__ void forward_kernel( float *y, const float *x, const float *k,
                                 const int B, const int M, const int C,
                                 const int H, const int W, const int K,
@@ -32,13 +34,12 @@ __global__ void forward_kernel( float *y, const float *x, const float *k,
 
     extern __shared__ float shmem[];
     float* X_shared = &shmem[0];
-    float* W_shared = &shmem[X_tile_width * X_tile_width];
 // An example use of these macros:
 // float a = y4d(0,0,0,0)
 // y4d(0,0,0,0) = a
 #define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
 #define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
-#define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
+#define k4d(i3, i2, i1, i0) const_k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
 
     int b = blockIdx.z; int m = blockIdx.y;
     int tile_h = blockIdx.x/TILE_W;
@@ -52,12 +53,6 @@ __global__ void forward_kernel( float *y, const float *x, const float *k,
     float acc = 0;
 
     for (int c = 0; c < C; c++) {
-        // loads K into shared memory
-        if ((h0 < K) && (w0 < K)) {
-            W_shared[h0 * K + w0] = k4d(m, c, h0, w0);
-        }
-        __syncthreads();
-
         for (int i = h; i < h_base + X_tile_width; i += TILE_WIDTH) {
             for (int j = w; j < w_base + X_tile_width; j += TILE_WIDTH) {
                 if ((i < H) && (j < W)) {
@@ -72,7 +67,7 @@ __global__ void forward_kernel( float *y, const float *x, const float *k,
         if (h < H_out && w < W_out) {
             for (int p = 0; p < K; p++) {
                 for (int q = 0; q < K; q++) {
-                    acc += X_shared[(h0 + p)*X_tile_width + w0 + q] * W_shared[p * K + q];
+                    acc += X_shared[(h0 + p)*X_tile_width + w0 + q] * k4d(m, c, p, q);
                 }
             }
         }
@@ -115,9 +110,10 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     int TILE_CNT_W = ceil(W_out/(TILE_WIDTH*1.0));
     dim3 gridDim(TILE_CNT_H*TILE_CNT_W, M, B);
     dim3 blockDim(TILE_WIDTH, TILE_WIDTH, 1);
+    cudaMemcpyToSymbol(const_k, w.dptr_, sizeof(float) * M * C * K * K);
 
     // Call the kernel
-    size_t shmem_size = sizeof(float) * ((TILE_WIDTH + K - 1)*(TILE_WIDTH + K - 1) + K*K);
+    size_t shmem_size = sizeof(float) * ((TILE_WIDTH + K - 1)*(TILE_WIDTH + K - 1));
     forward_kernel<<<gridDim, blockDim, shmem_size>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K,TILE_CNT_H,TILE_CNT_W);
 
     // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.

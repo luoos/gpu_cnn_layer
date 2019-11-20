@@ -2,7 +2,8 @@
 #ifndef MXNET_OPERATOR_NEW_FORWARD_CUH_
 #define MXNET_OPERATOR_NEW_FORWARD_CUH_
 
-#define TILE_WIDTH 16
+#define TILE_WIDTH 32
+#define BLOCK_SIZE 512
 
 #include <mxnet/base.h>
 
@@ -13,73 +14,49 @@ namespace op
 
 __constant__ float const_k[12000];
 
-__global__ void forward_kernel( float *y, const float *x, const float *k,
+__global__ void unroll_x(float *x, float *x_unroll, int batch_idx, int H, int W, int K, int C) {
+    int idx = blockIdx.x*blockDim.x + threadIdx.x;
+    int H_out = H - K + 1;
+    int W_out = W - K + 1;
+    int col_size = H_out * W_out;
+    int input_map_idx = idx / col_size;
+    int output_idx = idx % col_size; // start point of i-th K*K
+    int input_row = output_idx / W_out;
+    int input_col = output_idx % W_out;
+    int x_row_base = input_map_idx*K*K*col_size;
+
+#define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
+    int i = 0;
+    if (idx < C * col_size) {
+        for (int r = 0; r < K; r++) {
+            for (int c = 0; c < K; c++) {
+                x_unroll[x_row_base+i*col_size+output_idx] = x4d(batch_idx, input_map_idx, input_row+r, input_col+c);
+                i++;
+            }
+    }
+    }
+#undef x4d
+}
+
+__global__ void forward_kernel( float *y, float *x, int batch_id,
                                 const int B, const int M, const int C,
-                                const int H, const int W, const int K,
-                                const int TILE_H, const int TILE_W)
+                                const int H, const int W, const int K)
 {
-
-    /*
-    Modify this function to implement the forward pass described in Chapter 16.
-    We have added an additional dimension to the tensors to support an entire mini-batch
-    The goal here is to be correct AND fast.
-    We have some nice #defs for you below to simplify indexing. Feel free to use them, or create your own.
-    */
-
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
-    int X_tile_width = TILE_WIDTH + K - 1;
-    // (void)H_out; // silence declared but never referenced warning. remove this line when you start working
-    // (void)W_out; // silence declared but never referenced warning. remove this line when you start working
 
-    extern __shared__ float shmem[];
-    float* X_shared = &shmem[0];
-// An example use of these macros:
-// float a = y4d(0,0,0,0)
-// y4d(0,0,0,0) = a
-#define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
-#define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
-#define k4d(i3, i2, i1, i0) const_k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
+    const int row = blockIdx.y*blockDim.y + threadIdx.y;
+    const int col = blockIdx.x*blockDim.x + threadIdx.x;
+    const int output_size = H_out * W_out;
+    const int inner_size = C * K * K;
 
-    int b = blockIdx.z; int m = blockIdx.y;
-    int tile_h = blockIdx.x/TILE_W;
-    int tile_w = blockIdx.x%TILE_W;
-    int h_base = tile_h*TILE_WIDTH;
-    int w_base = tile_w*TILE_WIDTH;
-    int h0 = threadIdx.y;
-    int w0 = threadIdx.x;
-    int h = h_base + h0;
-    int w = w_base + w0;
-    float acc = 0;
-
-    for (int c = 0; c < C; c++) {
-        for (int i = h; i < h_base + X_tile_width; i += TILE_WIDTH) {
-            for (int j = w; j < w_base + X_tile_width; j += TILE_WIDTH) {
-                if ((i < H) && (j < W)) {
-                    X_shared[(i - h_base)*X_tile_width + j - w_base] = x4d(b, c, i, j);
-                } else {
-                    X_shared[(i - h_base)*X_tile_width + j - w_base] = 0.0;
-                }
-            }
+    if ((row < M) && (col < output_size)) {
+        float acc = 0;
+        for (int k = 0; k < inner_size; k++) {
+            acc += const_k[row*inner_size + k] * x[k*output_size + col];
         }
-        __syncthreads();
-
-        if (h < H_out && w < W_out) {
-            for (int p = 0; p < K; p++) {
-                for (int q = 0; q < K; q++) {
-                    acc += X_shared[(h0 + p)*X_tile_width + w0 + q] * k4d(m, c, p, q);
-                }
-            }
-        }
-        __syncthreads();
+        y[batch_id * (M * output_size) + row * output_size + col] = acc;
     }
-    if (h < H_out && w < W_out) {
-        y4d(b, m, h, w) = acc;
-    }
-
-#undef y4d
-#undef x4d
-#undef k4d
 }
 
 /*
@@ -106,15 +83,27 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
     // Set the kernel dimensions
-    int TILE_CNT_H = ceil(H_out/(TILE_WIDTH*1.0));
-    int TILE_CNT_W = ceil(W_out/(TILE_WIDTH*1.0));
-    dim3 gridDim(TILE_CNT_H*TILE_CNT_W, M, B);
-    dim3 blockDim(TILE_WIDTH, TILE_WIDTH, 1);
     cudaMemcpyToSymbol(const_k, w.dptr_, sizeof(float) * M * C * K * K);
+    float *device_X_unroll;
+    const int X_unroll_size = C*K*K*H_out*W_out;
+    cudaMalloc((void **)&device_X_unroll, sizeof(float)*X_unroll_size);
 
-    // Call the kernel
-    size_t shmem_size = sizeof(float) * ((TILE_WIDTH + K - 1)*(TILE_WIDTH + K - 1));
-    forward_kernel<<<gridDim, blockDim, shmem_size>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K,TILE_CNT_H,TILE_CNT_W);
+    // dimension for unroll kernel
+    dim3 dimBlock_unroll(BLOCK_SIZE, 1, 1);
+    // each thread loads K*K elements
+    dim3 dimGrid_unroll(ceil(X_unroll_size/(1.0*BLOCK_SIZE*K*K)), 1, 1);
+
+    // dimension for matrix multiplication kernel
+    dim3 dimBlock_multi(TILE_WIDTH, TILE_WIDTH, 1);
+    dim3 dimGrid_multi(ceil(H_out*W_out/(1.0*TILE_WIDTH)), ceil(M/(1.0*TILE_WIDTH)), 1);
+
+    for (int bi = 0; bi < B; bi++) {
+        unroll_x<<<dimGrid_unroll, dimBlock_unroll>>>(x.dptr_, device_X_unroll, bi, H, W, K, C);
+        cudaDeviceSynchronize();
+        forward_kernel<<<dimGrid_multi, dimBlock_multi>>>(y.dptr_, device_X_unroll, bi, B, M, C, H, W, K);
+        cudaDeviceSynchronize();
+    }
+
 
     // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.
     MSHADOW_CUDA_CALL(cudaDeviceSynchronize());

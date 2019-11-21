@@ -16,4 +16,5 @@ commands:
     - nice -n20 make -C /mxnet # build mxnet
     - pip2 install --user -e /mxnet/python   # install python bindings
     - time python m4.1.py # GPU
+    - nvprof -o timeline.nvprof python m4.1.py
     - nvprof --kernels "::unroll:1" --analysis-metrics -o forward1_analysis.nvprof python m4.1.py

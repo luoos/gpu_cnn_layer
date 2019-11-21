@@ -12,7 +12,7 @@ namespace mxnet
 namespace op
 {
 
-__global__ void unroll_x(float *x, float *x_unroll, int batch_idx, int H, int W, int K, int C) {
+__global__ void unroll_expand(float *x, float *x_unroll, int batch_idx, int H, int W, int K, int C) {
     int idx = blockIdx.x*blockDim.x + threadIdx.x;
     int H_out = H - K + 1;
     int W_out = W - K + 1;
@@ -36,7 +36,7 @@ __global__ void unroll_x(float *x, float *x_unroll, int batch_idx, int H, int W,
 #undef x4d
 }
 
-__global__ void forward_kernel( float *y, float *x, float *w, int batch_id,
+__global__ void unroll_multiply( float *y, float *x, float *w, int batch_id,
                                 const int B, const int M, const int C,
                                 const int H, const int W, const int K)
 {
@@ -118,9 +118,9 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     dim3 dimGrid_multi(ceil(H_out*W_out/(1.0*TILE_WIDTH)), ceil(M/(1.0*TILE_WIDTH)), 1);
 
     for (int bi = 0; bi < B; bi++) {
-        unroll_x<<<dimGrid_unroll, dimBlock_unroll>>>(x.dptr_, device_X_unroll, bi, H, W, K, C);
+        unroll_expand<<<dimGrid_unroll, dimBlock_unroll>>>(x.dptr_, device_X_unroll, bi, H, W, K, C);
         cudaDeviceSynchronize();
-        forward_kernel<<<dimGrid_multi, dimBlock_multi>>>(y.dptr_, device_X_unroll, w.dptr_, bi, B, M, C, H, W, K);
+        unroll_multiply<<<dimGrid_multi, dimBlock_multi>>>(y.dptr_, device_X_unroll, w.dptr_, bi, B, M, C, H, W, K);
         cudaDeviceSynchronize();
     }
 

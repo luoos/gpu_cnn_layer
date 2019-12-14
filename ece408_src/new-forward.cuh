@@ -1,4 +1,3 @@
-
 #ifndef MXNET_OPERATOR_NEW_FORWARD_CUH_
 #define MXNET_OPERATOR_NEW_FORWARD_CUH_
 
@@ -12,38 +11,13 @@ namespace mxnet
 namespace op
 {
 
-__global__ void unroll_expand(float *x, float *x_unroll, int batch_idx, int H, int W, int K, int C) {
-    int idx = blockIdx.x*blockDim.x + threadIdx.x;
-    int H_out = H - K + 1;
-    int W_out = W - K + 1;
-    int col_size = H_out * W_out;
-    int input_map_idx = idx / col_size;
-    int output_idx = idx % col_size; // start point of i-th K*K
-    int input_row = output_idx / W_out;
-    int input_col = output_idx % W_out;
-    int x_row_base = input_map_idx*K*K*col_size;
-
-#define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
-    int i = 0;
-    if (idx < C * col_size) {
-        for (int r = 0; r < K; r++) {
-            for (int c = 0; c < K; c++) {
-                x_unroll[x_row_base+i*col_size+output_idx] = x4d(batch_idx, input_map_idx, input_row+r, input_col+c);
-                i++;
-            }
-        }
-    }
-#undef x4d
-}
-
-__global__ void unroll_multiply( float *y, float *x, float *w, int batch_id,
+__global__ void unroll_multiply( float *y, float *x, float *x_unroll, float *w, int batch_id,
                                 const int B, const int M, const int C,
                                 const int H, const int W, const int K)
 {
-    __shared__ float subTileW[TILE_WIDTH][TILE_WIDTH];
-    __shared__ float subTileX[TILE_WIDTH][TILE_WIDTH];
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
+    #define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
 
     int bx = blockIdx.x;    int by = blockIdx.y;
     int tx = threadIdx.x;   int ty = threadIdx.y;
@@ -53,23 +27,25 @@ __global__ void unroll_multiply( float *y, float *x, float *w, int batch_id,
     const int inner_size = C * K * K;
     float acc = 0;
 
+    //new implement for unroll fusion
+    int index_x = bx * TILE_WIDTH + tx;
+    int index_y = by * TILE_WIDTH + ty;
+    int h_base = index_x / W_out;
+    int w_base = index_x % W_out;
+    int h_unroll = h_base + index_y % (K * K) / K; 
+    int w_unroll = w_base + index_y % K;
+    int c = index_y / (K * K);
+
+    if (index_x < X_col_size && index_y < inner_size){
+        x_unroll[index_y*X_col_size+index_x] = x4d(batch_id, c, h_unroll, w_unroll);
+    }
+    __syncthreads();
+
+    //end
     for (int m = 0; m < (inner_size-1)/TILE_WIDTH + 1; m++) {
-        if (row < M && m*TILE_WIDTH + tx < inner_size) {
-            subTileW[ty][tx] = w[row*inner_size + m*TILE_WIDTH + tx];
-        } else {
-            subTileW[ty][tx] = 0;
-        }
-
-        if (m*TILE_WIDTH + ty < inner_size && col < X_col_size) {
-            subTileX[ty][tx] = x[(m*TILE_WIDTH + ty)*X_col_size + col];
-        } else {
-            subTileX[ty][tx] = 0;
-        }
-        __syncthreads();
-
         if (row < M && col < X_col_size) {
             for (int k = 0; k < TILE_WIDTH; k++) {
-                acc += subTileW[ty][k] * subTileX[k][tx];
+                acc += w[row*inner_size + m*TILE_WIDTH + k] * x_unroll[(m*TILE_WIDTH + k)*X_col_size + col];
             }
         }
         __syncthreads();
@@ -78,6 +54,7 @@ __global__ void unroll_multiply( float *y, float *x, float *w, int batch_id,
     if (row < M && col < X_col_size) {
         y[batch_id*M*X_col_size + row*X_col_size + col] = acc;
     }
+    #undef x4d
 }
 
 /*
@@ -108,19 +85,12 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     const int X_unroll_size = C*K*K*H_out*W_out;
     cudaMalloc((void **)&device_X_unroll, sizeof(float)*X_unroll_size);
 
-    // dimension for unroll kernel
-    dim3 dimBlock_unroll(BLOCK_SIZE, 1, 1);
-    // each thread loads K*K elements
-    dim3 dimGrid_unroll(ceil(X_unroll_size/(1.0*BLOCK_SIZE*K*K)), 1, 1);
-
     // dimension for matrix multiplication kernel
     dim3 dimBlock_multi(TILE_WIDTH, TILE_WIDTH, 1);
-    dim3 dimGrid_multi(ceil(H_out*W_out/(1.0*TILE_WIDTH)), ceil(M/(1.0*TILE_WIDTH)), 1);
+    dim3 dimGrid_multi(ceil(H_out*W_out/(1.0*TILE_WIDTH)), ceil(C*K*K/(1.0*TILE_WIDTH)), 1);
 
     for (int bi = 0; bi < B; bi++) {
-        unroll_expand<<<dimGrid_unroll, dimBlock_unroll>>>(x.dptr_, device_X_unroll, bi, H, W, K, C);
-        cudaDeviceSynchronize();
-        unroll_multiply<<<dimGrid_multi, dimBlock_multi>>>(y.dptr_, device_X_unroll, w.dptr_, bi, B, M, C, H, W, K);
+        unroll_multiply<<<dimGrid_multi, dimBlock_multi>>>(y.dptr_, x.dptr_, device_X_unroll, w.dptr_, bi, B, M, C, H, W, K);
         cudaDeviceSynchronize();
     }
 

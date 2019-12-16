@@ -3,6 +3,7 @@
 
 #define TILE_WIDTH 32
 #define BLOCK_SIZE 512
+#define B_SIZE 16
 
 #include <mxnet/base.h>
 
@@ -24,7 +25,7 @@ __global__ void unroll_multiply( float *y, float *x, float *x_unroll, float *w, 
     #define k4d(i3, i2, i1, i0) w[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
     #define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
 
-    int bx = blockIdx.x;    int by = blockIdx.y;
+    int bx = blockIdx.x;    int by = blockIdx.y;    int bz = blockIdx.z;
     int tx = threadIdx.x;   int ty = threadIdx.y;
     const int row = by*TILE_WIDTH + ty;
     const int col = bx*TILE_WIDTH + tx;
@@ -53,10 +54,10 @@ __global__ void unroll_multiply( float *y, float *x, float *x_unroll, float *w, 
             sharedW[ty][tx] = 0;
         }
 
-        int x_b = batch_id; int x_c = row_now / (K * K); int x_p = row_now % (K * K) / K; int x_q = row_now % K;    
+        int x_b = batch_id * B_SIZE + bz; int x_c = row_now / (K * K); int x_p = row_now % (K * K) / K; int x_q = row_now % K;    
         int x_h = col / W_out; int x_w = col % W_out;   
         
-        if (row_now < inner_size && col < X_col_size) {
+        if (row_now < inner_size && col < X_col_size && x_b < B) {
             sharedX[ty][tx] = x4d(x_b, x_c, x_h + x_p, x_w + x_q);
         } else {
             sharedX[ty][tx] = 0;
@@ -69,8 +70,8 @@ __global__ void unroll_multiply( float *y, float *x, float *x_unroll, float *w, 
         __syncthreads();
     }
 
-    if (row < M && col < X_col_size) {
-        int y_b = batch_id; int y_m = row; int y_h = col / W_out; int y_w = col % W_out;   
+    int y_b = batch_id * B_SIZE + bz; int y_m = row; int y_h = col / W_out; int y_w = col % W_out;   
+    if (row < M && col < X_col_size && y_b < B) {
         y4d(y_b, y_m, y_h, y_w) = acc;
     }
     #undef x4d
@@ -107,10 +108,11 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     cudaMalloc((void **)&device_X_unroll, sizeof(float)*X_unroll_size);
 
     // dimension for matrix multiplication kernel
+    int bSize = ceil(B / (B_SIZE * 1.0));
     dim3 dimBlock_multi(TILE_WIDTH, TILE_WIDTH, 1);
-    dim3 dimGrid_multi(ceil(H_out*W_out/(1.0*TILE_WIDTH)), ceil(C*K*K/(1.0*TILE_WIDTH)), 1);
+    dim3 dimGrid_multi(ceil(H_out*W_out/(1.0*TILE_WIDTH)), ceil(C*K*K/(1.0*TILE_WIDTH)), B_SIZE);
 
-    for (int bi = 0; bi < B; bi++) {
+    for (int bi = 0; bi < bSize; bi++) {
         unroll_multiply<<<dimGrid_multi, dimBlock_multi>>>(y.dptr_, x.dptr_, device_X_unroll, w.dptr_, bi, B, M, C, H, W, K);
         cudaDeviceSynchronize();
     }

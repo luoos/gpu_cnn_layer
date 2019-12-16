@@ -33,19 +33,9 @@ __global__ void unroll_multiply( float *y, float *x, float *x_unroll, float *w, 
     const int inner_size = C * K * K;
     float acc = 0;
 
-    //new implement for unroll fusion
-    // int index_x = bx * TILE_WIDTH + tx;
-    // int index_y = by * TILE_WIDTH + ty;
-    // int h_base = index_x / W_out;
-    // int w_base = index_x % W_out;
-    // int h_unroll = h_base + index_y % (K * K) / K; 
-    // int w_unroll = w_base + index_y % K;
-    // int c = index_y / (K * K);
-    int blvl = ceil(inner_size/(1.0*TILE_WIDTH));
-
-    for(int base = 0; base < blvl; base ++){
-        int row_now = base * TILE_WIDTH + ty; 
-        int col_now = base * TILE_WIDTH + tx; 
+    for(int base = 0; base < ceil(inner_size/(1.0*TILE_WIDTH)); base ++){
+        int row_now = base * TILE_WIDTH + ty;
+        int col_now = base * TILE_WIDTH + tx;
         int k_m = row; int k_c = col_now / (K * K); int k_h = col_now % (K * K) / K; int k_w = col_now % K; 
 
         if (col_now < inner_size && row < M) {
@@ -55,18 +45,47 @@ __global__ void unroll_multiply( float *y, float *x, float *x_unroll, float *w, 
         }
 
         int x_b = batch_id * B_SIZE + bz; int x_c = row_now / (K * K); int x_p = row_now % (K * K) / K; int x_q = row_now % K;    
-        int x_h = col / W_out; int x_w = col % W_out;   
-        
+        int x_h = col / W_out; int x_w = col % W_out;
+
         if (row_now < inner_size && col < X_col_size && x_b < B) {
             sharedX[ty][tx] = x4d(x_b, x_c, x_h + x_p, x_w + x_q);
         } else {
             sharedX[ty][tx] = 0;
         }
         __syncthreads();
-
-        for(int i = 0; i < TILE_WIDTH; i++){
-            acc += sharedW[ty][i] * sharedX[i][tx];
-        }
+        acc += (
+            (sharedW[ty][ 0] * sharedX[ 0][tx]) +
+            (sharedW[ty][ 1] * sharedX[ 1][tx]) +
+            (sharedW[ty][ 2] * sharedX[ 2][tx]) +
+            (sharedW[ty][ 3] * sharedX[ 3][tx]) +
+            (sharedW[ty][ 4] * sharedX[ 4][tx]) +
+            (sharedW[ty][ 5] * sharedX[ 5][tx]) +
+            (sharedW[ty][ 6] * sharedX[ 6][tx]) +
+            (sharedW[ty][ 7] * sharedX[ 7][tx]) +
+            (sharedW[ty][ 8] * sharedX[ 8][tx]) +
+            (sharedW[ty][ 9] * sharedX[ 9][tx]) +
+            (sharedW[ty][10] * sharedX[10][tx]) +
+            (sharedW[ty][11] * sharedX[11][tx]) +
+            (sharedW[ty][12] * sharedX[12][tx]) +
+            (sharedW[ty][13] * sharedX[13][tx]) +
+            (sharedW[ty][14] * sharedX[14][tx]) +
+            (sharedW[ty][15] * sharedX[15][tx]) +
+            (sharedW[ty][16] * sharedX[16][tx]) +
+            (sharedW[ty][17] * sharedX[17][tx]) +
+            (sharedW[ty][18] * sharedX[18][tx]) +
+            (sharedW[ty][19] * sharedX[19][tx]) +
+            (sharedW[ty][20] * sharedX[20][tx]) +
+            (sharedW[ty][21] * sharedX[21][tx]) +
+            (sharedW[ty][22] * sharedX[22][tx]) +
+            (sharedW[ty][23] * sharedX[23][tx]) +
+            (sharedW[ty][24] * sharedX[24][tx]) +
+            (sharedW[ty][25] * sharedX[25][tx]) +
+            (sharedW[ty][26] * sharedX[26][tx]) +
+            (sharedW[ty][27] * sharedX[27][tx]) +
+            (sharedW[ty][28] * sharedX[28][tx]) +
+            (sharedW[ty][29] * sharedX[29][tx]) +
+            (sharedW[ty][30] * sharedX[30][tx]) +
+            (sharedW[ty][31] * sharedX[31][tx]));
         __syncthreads();
     }
 

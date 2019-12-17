@@ -2,8 +2,7 @@
 #define MXNET_OPERATOR_NEW_FORWARD_CUH_
 
 #define TILE_WIDTH 32
-#define BLOCK_SIZE 512
-#define B_SIZE 16
+#define BLOCK_SIZE 1024
 
 #include <mxnet/base.h>
 
@@ -12,7 +11,9 @@ namespace mxnet
 namespace op
 {
 
-__global__ void unroll_multiply( float *y, float *x, float *x_unroll, float *w, int batch_id,
+__constant__ float const_k[8000];
+
+__global__ void unroll_multiply( float *y, float *x, float *w,
                                 const int B, const int M, const int C,
                                 const int H, const int W, const int K)
 {
@@ -22,21 +23,24 @@ __global__ void unroll_multiply( float *y, float *x, float *x_unroll, float *w, 
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
     #define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
-    #define k4d(i3, i2, i1, i0) w[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
+    #define k4d(i3, i2, i1, i0) const_k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
     #define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
 
     int bx = blockIdx.x;    int by = blockIdx.y;    int bz = blockIdx.z;
     int tx = threadIdx.x;   int ty = threadIdx.y;
     const int row = by*TILE_WIDTH + ty;
     const int col = bx*TILE_WIDTH + tx;
-    const int X_col_size = H_out * W_out;
+    const int Y_width = H_out * W_out;
     const int inner_size = C * K * K;
     float acc = 0;
 
-    for(int base = 0; base < ceil(inner_size/(1.0*TILE_WIDTH)); base ++){
+    for(int base = 0; base < ceil(inner_size/(1.0*TILE_WIDTH)); base++){
         int row_now = base * TILE_WIDTH + ty;
         int col_now = base * TILE_WIDTH + tx;
-        int k_m = row; int k_c = col_now / (K * K); int k_h = col_now % (K * K) / K; int k_w = col_now % K; 
+        int k_m = row;
+        int k_c = col_now / (K * K);
+        int k_h = col_now % (K * K) / K;
+        int k_w = col_now % K;
 
         if (col_now < inner_size && row < M) {
             sharedW[ty][tx] = k4d(k_m, k_c, k_h, k_w);
@@ -44,14 +48,19 @@ __global__ void unroll_multiply( float *y, float *x, float *x_unroll, float *w, 
             sharedW[ty][tx] = 0;
         }
 
-        int x_b = batch_id * B_SIZE + bz; int x_c = row_now / (K * K); int x_p = row_now % (K * K) / K; int x_q = row_now % K;    
-        int x_h = col / W_out; int x_w = col % W_out;
+        int x_b = bz;
+        int x_c = row_now / (K * K);
+        int x_p = row_now % (K * K) / K;
+        int x_q = row_now % K;
+        int x_h = col / W_out;
+        int x_w = col % W_out;
 
-        if (row_now < inner_size && col < X_col_size && x_b < B) {
+        if (row_now < inner_size && col < Y_width) {
             sharedX[ty][tx] = x4d(x_b, x_c, x_h + x_p, x_w + x_q);
         } else {
             sharedX[ty][tx] = 0;
         }
+
         __syncthreads();
         acc += (
             (sharedW[ty][ 0] * sharedX[ 0][tx]) +
@@ -89,8 +98,8 @@ __global__ void unroll_multiply( float *y, float *x, float *x_unroll, float *w, 
         __syncthreads();
     }
 
-    int y_b = batch_id * B_SIZE + bz; int y_m = row; int y_h = col / W_out; int y_w = col % W_out;   
-    if (row < M && col < X_col_size && y_b < B) {
+    int y_b = bz; int y_m = row; int y_h = col / W_out; int y_w = col % W_out;
+    if (row < M && col < Y_width) {
         y4d(y_b, y_m, y_h, y_w) = acc;
     }
     #undef x4d
@@ -106,7 +115,6 @@ __global__ void unroll_multiply( float *y, float *x, float *x_unroll, float *w, 
 template <>
 void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tensor<gpu, 4, float> &x, const mshadow::Tensor<gpu, 4, float> &w)
 {
-
     // Use mxnet's CHECK_EQ to do assertions.
     // Remove this assertion when you do your implementation!
     // CHECK_EQ(0, 1) << "Remove this line and replace with your implementation";
@@ -121,21 +129,13 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
 
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
-    // Set the kernel dimensions
-    float *device_X_unroll;
-    const int X_unroll_size = C*K*K*H_out*W_out;
-    cudaMalloc((void **)&device_X_unroll, sizeof(float)*X_unroll_size);
+    const int Y_width = H_out * W_out;
+    cudaMemcpyToSymbol(const_k, w.dptr_, sizeof(float) * M * C * K * K);
 
-    // dimension for matrix multiplication kernel
-    int bSize = ceil(B / (B_SIZE * 1.0));
     dim3 dimBlock_multi(TILE_WIDTH, TILE_WIDTH, 1);
-    dim3 dimGrid_multi(ceil(H_out*W_out/(1.0*TILE_WIDTH)), ceil(C*K*K/(1.0*TILE_WIDTH)), B_SIZE);
+    dim3 dimGrid_multi(ceil(Y_width/(1.0*TILE_WIDTH)), ceil(M/(1.0*TILE_WIDTH)), B);
 
-    for (int bi = 0; bi < bSize; bi++) {
-        unroll_multiply<<<dimGrid_multi, dimBlock_multi>>>(y.dptr_, x.dptr_, device_X_unroll, w.dptr_, bi, B, M, C, H, W, K);
-        cudaDeviceSynchronize();
-    }
-
+    unroll_multiply<<<dimGrid_multi, dimBlock_multi>>>(y.dptr_, x.dptr_, w.dptr_, B, M, C, H, W, K);
 
     // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.
     MSHADOW_CUDA_CALL(cudaDeviceSynchronize());

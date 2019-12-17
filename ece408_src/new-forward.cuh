@@ -2,7 +2,6 @@
 #define MXNET_OPERATOR_NEW_FORWARD_CUH_
 
 #define TILE_WIDTH 32
-#define BLOCK_SIZE 1024
 
 #include <mxnet/base.h>
 
@@ -10,8 +9,6 @@ namespace mxnet
 {
 namespace op
 {
-
-__constant__ float const_k[8000];
 
 __global__ void unroll_multiply( float *y, float *x, float *w,
                                 const int B, const int M, const int C,
@@ -23,7 +20,7 @@ __global__ void unroll_multiply( float *y, float *x, float *w,
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
     #define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
-    #define k4d(i3, i2, i1, i0) const_k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
+    #define k4d(i3, i2, i1, i0) w[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
     #define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
 
     int bx = blockIdx.x;    int by = blockIdx.y;    int bz = blockIdx.z;
@@ -130,7 +127,7 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
     const int Y_width = H_out * W_out;
-    cudaMemcpyToSymbol(const_k, w.dptr_, sizeof(float) * M * C * K * K);
+    // cudaMemcpyToSymbol(const_k, w.dptr_, sizeof(float) * M * C * K * K);
 
     dim3 dimBlock_multi(TILE_WIDTH, TILE_WIDTH, 1);
     dim3 dimGrid_multi(ceil(Y_width/(1.0*TILE_WIDTH)), ceil(M/(1.0*TILE_WIDTH)), B);

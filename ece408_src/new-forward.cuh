@@ -34,26 +34,20 @@ __global__ void unroll_multiply( float *y, float *x, float *w,
     for(int base = 0; base < ceil(inner_size/(1.0*TILE_WIDTH)); base++){
         int row_now = base * TILE_WIDTH + ty;
         int col_now = base * TILE_WIDTH + tx;
-        int k_m = row;
-        int k_c = col_now / (K * K);
-        int k_h = col_now % (K * K) / K;
-        int k_w = col_now % K;
 
         if (col_now < inner_size && row < M) {
-            sharedW[ty][tx] = k4d(k_m, k_c, k_h, k_w);
+            sharedW[ty][tx] = k4d(row, col_now / (K * K), col_now % (K * K) / K, col_now % K);
         } else {
             sharedW[ty][tx] = 0;
         }
 
-        int x_b = bz;
-        int x_c = row_now / (K * K);
         int x_p = row_now % (K * K) / K;
         int x_q = row_now % K;
         int x_h = col / W_out;
         int x_w = col % W_out;
 
         if (row_now < inner_size && col < Y_width) {
-            sharedX[ty][tx] = x4d(x_b, x_c, x_h + x_p, x_w + x_q);
+            sharedX[ty][tx] = x4d(bz, row_now / (K * K), x_h + x_p, x_w + x_q);
         } else {
             sharedX[ty][tx] = 0;
         }
@@ -95,9 +89,8 @@ __global__ void unroll_multiply( float *y, float *x, float *w,
         __syncthreads();
     }
 
-    int y_b = bz; int y_m = row; int y_h = col / W_out; int y_w = col % W_out;
     if (row < M && col < Y_width) {
-        y4d(y_b, y_m, y_h, y_w) = acc;
+        y4d(bz, row, col / W_out, col % W_out) = acc;
     }
     #undef x4d
     #undef k4d
